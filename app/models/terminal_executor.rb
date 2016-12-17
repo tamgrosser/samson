@@ -24,43 +24,8 @@ class TerminalExecutor
   end
 
   def execute!(*commands)
-    if @verbose
-      commands.map! { |c| "echo » #{c.shellescape}\n#{resolve_secrets(c)}" }
-    else
-      commands.map! { |c| resolve_secrets(c) }
-    end
-    commands.unshift("set -e")
-
-    execute_command!(commands.join("\n"))
-  end
-
-  def stop!(signal)
-    system('kill', "-#{signal}", "-#{pgid}") if pgid
-  end
-
-  private
-
-  def resolve_secrets(command)
-    deploy_groups = @deploy.try(:stage).try(:deploy_groups) || []
-    project = @deploy.try(:project)
-    resolver = Samson::Secrets::KeyResolver.new(project, deploy_groups)
-
-    result = command.gsub(/\b#{SECRET_PREFIX}(#{SecretStorage::SECRET_KEY_REGEX})\b/) do
-      key = $1
-      if expanded = resolver.expand('unused', key).first&.last
-        key.replace(expanded)
-        SecretStorage.read(key, include_value: true).fetch(:value)
-      end
-    end
-
-    resolver.verify!
-
-    result
-  end
-
-  def execute_command!(command)
     options = {in: '/dev/null', unsetenv_others: true}
-    output, input, @pid = PTY.spawn(whitelisted_env, command, options)
+    output, input, @pid = PTY.spawn(whitelisted_env, script(commands), options)
     @pgid = pgid_from_pid(@pid)
 
     begin
@@ -78,6 +43,42 @@ class TerminalExecutor
     ensure
       input.close
     end
+  end
+
+  def stop!(signal)
+    system('kill', "-#{signal}", "-#{pgid}") if pgid
+  end
+
+  private
+
+  def script(commands)
+    commands.map! do |c|
+      if @verbose
+        "echo » #{c.shellescape}\n#{resolve_secrets(c)}"
+      else
+        resolve_secrets(c)
+      end
+    end
+    commands.unshift("set -e")
+    commands.join("\n")
+  end
+
+  def resolve_secrets(command)
+    deploy_groups = @deploy.try(:stage).try(:deploy_groups) || []
+    project = @deploy.try(:project)
+    resolver = Samson::Secrets::KeyResolver.new(project, deploy_groups)
+
+    result = command.gsub(/\b#{SECRET_PREFIX}(#{SecretStorage::SECRET_KEY_REGEX})\b/) do
+      key = $1
+      if expanded = resolver.expand('unused', key).first&.last
+        key.replace(expanded)
+        SecretStorage.read(key, include_value: true).fetch(:value)
+      end
+    end
+
+    resolver.verify!
+
+    result
   end
 
   # We need the group pid to cleanly shut down all children
