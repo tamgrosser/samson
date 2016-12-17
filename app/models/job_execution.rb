@@ -28,6 +28,9 @@ class JobExecution
     @job = job
     @reference = reference
     @execution_block = block
+    @stopped = false
+    @finished = false
+    @thread = nil
 
     @repository = @job.project.repository
     @repository.executor = @executor
@@ -57,13 +60,13 @@ class JobExecution
   end
 
   def stop!
-    if @thread
-      @executor.stop! 'INT'
-      return if @thread.join(stop_timeout)
+    return unless @thread&.alive?
 
+    @stopped = true
+    @executor.stop! 'INT'
+    unless @thread.join(stop_timeout)
       @executor.stop! 'KILL'
-      @thread.join(stop_timeout) ||
-        (Rails.env.test? ? @thread.join : @thread.kill) # test hangs forever when using .kill here
+      @thread.join(stop_timeout) || @thread.kill
     end
 
     @job.cancelled!
@@ -112,9 +115,9 @@ class JobExecution
       @job.fail!
     end
   rescue => e
-    error!(e)
+    error!(e) unless @stopped
   ensure
-    finish
+    finish unless @stopped # when thread was killed we might be in a bad state, so avoid doing work here
     ActiveRecord::Base.clear_active_connections!
   end
   add_transaction_tracer :run!,
@@ -122,6 +125,8 @@ class JobExecution
     params: '{ job_id: id, project: job.project.try(:name), reference: reference }'
 
   def finish
+    return if @finished
+    @finished = true
     @subscribers.each(&:call)
   end
 
